@@ -100,17 +100,22 @@ def run():
     tone_skepticism   = _ask_float("Skepticism (0=credulous, 1=skeptical)", 0.55, 0.0, 1.0)
     tone_analytical   = _ask_float("Analytical (0=intuitive, 1=analytical)", 0.65, 0.0, 1.0)
     tone_verbosity    = _ask_float("Verbosity (0=terse, 1=verbose)", 0.65, 0.0, 1.0)
+    tone_confidence   = _ask_float("Confidence (0=uncertain, 1=confident)", 0.7, 0.0, 1.0)
+
 
     # Conversation preferences
     greet_style = _ask_choice("Greeting style", ["short","neutral","warm","none"], default="warm")
     slang       = _ask_choice("Use slang", ["never","rarely","sometimes","often"], default="rarely")
     emojis      = _ask_choice("Use emojis", ["never","sparingly","sometimes","often"], default="sparingly")
+    code_syntax = _ask_choice("Use code syntax highlighting", ["never","sparingly","sometimes","often"], default="sparingly")
 
     # Boundaries / Safety knobs
     refuse_unsure   = _ask_bool("Politely refuse when unsure?", True)
-    cite_sources    = _ask_bool("Cite sources when making nontrivial claims (when browsing is available)?", True)
     avoid_personas  = _ask_bool("Avoid pretending to be a human?", True)
     avoid_thirdperson = _ask_bool("Avoid talking about self in third person?", True)
+    avoid_filler_words = _ask_bool("Avoid filler words (e.g. 'um', 'like')?", True)
+    avoid_repetition = _ask_bool("Avoid unnecessary repetition?", True)
+    avoid_small_talk = _ask_bool("Avoid small talk?", True)
 
     # Guardrails / topics
     taboo_raw = _ask("Topics to avoid entirely (comma-separated, optional)", "")
@@ -183,11 +188,15 @@ def run():
             "verbosity": tone_verbosity,
             "greeting": greet_style,
             "slang": slang,
-            "emojis": emojis
+            "emojis": emojis,
+            "confidence": tone_confidence,
+            "code_syntax": code_syntax,
+            "avoid_filler_words": avoid_filler_words,
+            "avoid_repetition": avoid_repetition,
+            "avoid_small_talk": avoid_small_talk
         },
         "boundaries": {
             "refuse_when_unsure": refuse_unsure,
-            "cite_sources": cite_sources,
             "avoid_pretending_human": avoid_personas,
             "avoid_third_person_self": avoid_thirdperson,
             "taboo_topics": taboo
