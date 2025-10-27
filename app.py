@@ -149,7 +149,7 @@ def sanitize_gist(text: str) -> str:
 def make_gist(llm, msg: str) -> str:
     sys = (
         "Rewrite the user's message as a short neutral memory note. "
-        "6–12 words. No opinions. No metaphors. "
+        "6-12 words. No opinions. No metaphors. "
         "No identity or role talk. "
         "Do not invent details beyond what was just said. Output only the note."
     )

@@ -10,6 +10,7 @@ GRAPH_PATH = STORE_DIR / "graph.json"
 TRAITS_PATH = DATA_DIR / "traits.json"
 
 # Embeddings
+# May want to change this to something specific to the language
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"  # 1024-d
 EMBEDDING_DIM = 1024
 EMBEDDING_NORMALIZE = True

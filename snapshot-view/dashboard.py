@@ -34,7 +34,7 @@ col1, col2 = st.sidebar.columns(2)
 # Autorefresh disabled (Streamlit has no reliable built-in timer without external components)
 refresh_note = col1.text_input("Refresh hint (optional)", value="")
 max_rows = col2.number_input("Max episodes", min_value=50, max_value=5000, value=400, step=50)
-st.sidebar.caption("Use the toolbar’s 'Rerun' button to refresh, or change any control above.")
+st.sidebar.caption("Use the toolbar's 'Rerun' button to refresh, or change any control above.")
 
 # ---------- Helpers ----------
 def _duck_df(sql: str, params: Tuple = ()) -> pd.DataFrame:

@@ -50,7 +50,7 @@ class GraphStore:
     def _ensure_bootstrap(self):
         if not self.g.has_node("ep_init"):
             # A light bootstrap node so the graph never visualises as empty
-            self.g.add_node("ep_init", type="Init", created=time.time())
+            self.g.add_node("episode_init", type="Init", created=time.time())
 
     def load(self):
         """Load graph from disk if present; otherwise start fresh with ep_init."""
