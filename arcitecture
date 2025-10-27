@@ -1,0 +1,146 @@
+                                         ┌───────────────────────────────┐
+                                         │           CONFIG              │
+                                         │ models, budgets, decode cfg   │
+                                         │ paths, thresholds, presets    │
+                                         └───────────────┬───────────────┘
+                                                         │
+                           (console)                     │
+  ┌──────────────────┐     text in       ┌───────────────▼───────────────┐
+  │  USER (Sabian)   ├──────────────────►│     CONVERSATION LOOP          │
+  └──────────────────┘                   │ (app.py main chat coroutine)   │
+                                         └───────┬─────────────────┬──────┘
+                                                 │                 │
+                                                 │                 │ realtime (non-blocking)
+                                                 │                 └──────────────► PUB BUS (ZMQ)
+                                                 │                                      │
+                                                 │                                      ▼
+                                           per turn                             STREAMLIT DASHBOARD
+                                                 │                              (reads snapshots only)
+                                                 ▼
+                                   ┌────────────────────────┐
+                                   │ 1) FACT EXTRACTOR      │  LLM mini-pass → JSON facts
+                                   │   (core/memcards)      │  (assistant/user facts; no boilerplate)
+                                   └──────────┬─────────────┘
+                                              │ upsert
+                                              ▼
+                                   ┌────────────────────────┐
+                                   │  TABULAR STORE         │
+                                   │  DuckDB (memory.duckdb)│
+                                   │  tables: episodes,     │
+                                   │          facts_kv      │
+                                   └──────────┬─────────────┘
+                                              │
+  user line ─embed──► 1024-d vector           │ recall (top facts)
+                     (BGE-large v1.5)         │
+              ┌───────────────┐               ▼
+              │  VECTOR STORE │        ┌─────────────────────────┐
+              │  numpy + idx  │◄──────►│  4) FACTS SNAPSHOTTER   │→ compact “Facts:” line
+              │  (vectors.npy)│        └─────────────────────────┘
+              └──────┬────────┘
+                     │ top-K candidates (ids, scores)
+                     ▼
+       ┌──────────────────────────┐
+       │ 2) RERANK & EXPAND       │
+       │  - MMR diversity         │
+       │  - CE (bge-reranker)     │
+       │  - Graph spreading act.  │
+       └──────┬─────────┬─────────┘
+              │         │
+      top ids │         │ related ids
+              │         ▼
+              │   ┌───────────────────────┐
+              │   │   GRAPH STORE         │
+              │   │   (graph.json, NX)    │
+              │   │   nodes: Episodes,    │
+              │   │   Concepts, Traits    │
+              │   └──────────┬────────────┘
+              │              │
+              ▼              │
+   ┌──────────────────────┐  │
+   │ 3) GISTS FETCHER     │  │  short per-episode gists
+   └──────────┬───────────┘  │
+              │              │
+              ▼              │
+   ┌──────────────────────────────┐
+   │ 5) DENSE MEMORY PACKER       │→ “MemoryPack: • microfacts …”
+   │   (LLM compress to bullets)  │
+   └──────────┬───────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────────────────────────────────────────┐
+   │ 6) SYSTEM CONTEXT COMPOSER                                       │
+   │   SYSTEM PRIMER (tone/identity guards)                           │
+   │ + FACTS line (high-conf facts_kv)                                │
+   │ + MEMORY PACK (bullets)                                          │
+   │ + RECENT SNAPSHOT HINTS (last episode gists)                     │
+   │ + STYLE HINT (active traits + mood)                              │
+   │ + NAME GUARD (address user by name only)                         │
+   └──────────┬───────────────────────────────────────────────────────┘
+              │
+              │ system + user → Ollama
+              ▼
+   ┌──────────────────────────────────────────────────────────────────┐
+   │ 7) LLM DECODE (Ollama)                                           │
+   │   - derive_decode_overrides (temp, num_predict, length presets)  │
+   │   - generate_complete:                                           │
+   │       * segment stitching / auto-continue (no visible “…”)       │
+   │       * stop tokens guard                                        │
+   │   - post filters:                                                │
+   │       * anti-poetry / anti-third-person rewrite if needed        │
+   │       * user name hygiene (never “User”)                         │
+   └──────────┬───────────────────────────────────────────────────────┘
+              │ reply text
+              ▼
+        print to console
+
+   ───────────────────────────  WRITE-BACK LEARNING  ───────────────────────────
+
+              ┌─────────────────────────────────────────────────────────┐
+              │ 8) EPISODE WRITE                                        │
+              │   - store raw summary (first 280 chars)                 │
+              │   - gist (LLM ≤ GIST_WORDS)                             │
+              │   - emotion label (transformers pipeline)               │
+              │   - vector add (embed_texts)                            │
+              │   - graph node/edges reinforce                          │
+              └─────────────────────────────────────────────────────────┘
+                              │            ▲
+                              │            │ reinforce edges/usage
+                              ▼            │
+                    DuckDB episodes  ◄────┘
+
+              ┌─────────────────────────────────────────────────────────┐
+              │ 9) FACTS UPSERT                                         │
+              │   - merge by (subject,key,value) with confidence gain   │
+              │   - conflict policy (e.g., gender needs stronger proof) │
+              │   - usage_count++ when recalled                         │
+              └─────────────────────────────────────────────────────────┘
+
+              ┌─────────────────────────────────────────────────────────┐
+              │ 10) TRAIT ENGINE                                        │
+              │   - mood update (rolling, decay)                        │
+              │   - heuristic trait bumps                               │
+              │   - LLM mini-pass: propose up to 2 new traits           │
+              └─────────────────────────────────────────────────────────┘
+
+              ┌─────────────────────────────────────────────────────────┐
+              │ 11) PERSISTENCE (atomic)                                │
+              │   vectors.npy (+ index), graph.json, traits.json        │
+              │   DuckDB (episodes, facts_kv)                            │
+              │   read-only snapshots for dashboard                     │
+              └─────────────────────────────────────────────────────────┘
+
+
+User says X
+  → memcards.extract_cards(X) [LLM JSON] → facts_kv.upsert
+  → traits.detect_mood(X) + traits.discover_from_llm(X)
+  → qvec = embed_texts(X)
+  → ids = vector_store.search(qvec) → MMR → (optional) CE rerank
+  → related = graph.spreading_activation(ids)
+  → gists = fetch_gists(ids ∪ related)
+  → mempack = LLM compress(gists + top facts)
+  → system = primer + facts + mempack + snapshot + style + name-guard
+  → reply = Ollama.generate(system, X) with auto-continue
+       ↳ rewrite guard if poetic/3rd-person, fix “User” → name
+  → console print(reply)
+  → write_episode(X, gist, emotion, qvec), graph edges++, traits reinforce
+  → export snapshots, publish realtime metrics
