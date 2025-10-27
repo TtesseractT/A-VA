@@ -1,0 +1,6 @@
+*.json
+*.duckdb
+*.ids.txt
+*.npy
+*.parquet
+*.pyc
