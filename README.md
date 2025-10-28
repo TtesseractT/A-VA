@@ -295,4 +295,4 @@ MIT `LICENSE`
 
 ### Credits
 
-Built by Uhmbrella (POC). Uses DuckDB for storage and a simple numpy vector index; LLM backend is pluggable (Ollama-friendly).
+Built by TtesseractT. Uses DuckDB for storage and a simple numpy vector index; LLM backend is pluggable (Ollama-friendly).
