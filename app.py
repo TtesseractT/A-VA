@@ -21,13 +21,16 @@ from core.traits import TraitEngine
 from core import retrieval
 from core.memcards import (
     extract_cards, upsert_cards, recall_cards, mark_cards_used,
-    ensure_user_name_fact, get_user_prefs
+    ensure_user_name_fact, get_user_prefs, recall_notes   # <— add recall_notes
 )
+
 from stores.vector_store import VectorStore
 from stores.graph_store import GraphStore
 from stores.tabular import TabularStore
 from core.llm import get_llm
 from core.realtime import EventBus
+from core.summarizer import summarize_window
+from core.mood import detect_mood_label, register_emotion
 
 # Wizard-driven persona helpers (no mood/emotion logic here)
 from core.persona import decode_overrides, system_primer
@@ -74,28 +77,146 @@ def too_similar(new_text: str, history: List[str], thr: float = 0.75) -> bool:
         return False
     return any(_jaccard(new_text, h) >= thr for h in history[-2:])
 
+# -------------------- resume / recap helpers --------------------
+def recent_memory_hints(db, user_id: str, n: int = None) -> list[str]:
+    if n is None:
+        n = int(getattr(config, "RESUME_HINT_GISTS", 8))
+    rows = db.list_episodes(user_id=user_id, limit=max(1, n)) or []
+    raw = []
+    for r in rows:
+        g = (r[8] or r[3] or "").strip()
+        if not g:
+            continue
+        g = " ".join(g.split()[:18])                  # clamp length
+        g = re.sub(r"\s*\|\s*", " ", g).strip()       # drop stray pipes
+        g = re.sub(r"\s{2,}", " ", g)                 # normalise spaces
+        raw.append(g)
+    # de-dup while preserving order
+    seen, clean = set(), []
+    for h in raw:
+        if h not in seen:
+            seen.add(h); clean.append(h)
+    return clean[:n]
+
+
+# --- windowed episode writer (summary across recent dialogue; no hard-coded traits/emotions) ---
+def write_episode_windowed(db, vs, gs, user_id: str, msg: str, qvec,
+                           te, llm, cards=None, *, dialogue_lines=None) -> str:
+    import uuid, time, numpy as _np
+    eid = str(uuid.uuid4())
+    ts = time.time()
+
+    # Build windowed summary
+    summary_obj = {"summary":"", "user_mood":"neutral", "topics":[], "actions":[]}
+    try:
+        if dialogue_lines:
+            summary_obj = summarize_window(llm, dialogue_lines, user_label=user_id, assistant_label=getattr(config, "ASSISTANT_NAME", "Assistant"))
+    except Exception:
+        pass
+    if not summary_obj.get("summary"):
+        summary_obj["summary"] = (msg or "").strip()[: getattr(config, "EPISODE_SUMMARY_CLAMP", 400)]
+
+    # Mood label persistence (metadata only)
+    mood_label = summary_obj.get("user_mood") or ""
+    if not mood_label or mood_label == "neutral":
+        try:
+            lab, _ = detect_mood_label(msg or "")
+            mood_label = lab or "neutral"
+        except Exception:
+            mood_label = "neutral"
+    register_emotion(mood_label)
+
+    gist = " ".join((summary_obj.get("summary","").split() or [])[:18])
+    row = {
+        "id": eid, "user_id": user_id, "ts": float(ts),
+        "summary": summary_obj.get("summary","")[: getattr(config, "EPISODE_SUMMARY_CLAMP", 400)],
+        "vector_dim": int(getattr(config, "EMBEDDING_DIM", 1024)),
+        "strength": 0.5, "usage_count": 0, "last_accessed": float(ts),
+        "gist": gist, "emotion": mood_label,
+    }
+    db.insert_episode(row)
+
+    # Vector + episode node
+    vs.add(_np.asarray(qvec, dtype="float32").reshape(1,-1), [eid])
+    if not gs.has_node(eid):
+        gs.add_node(eid, type="Episode", user_id=user_id, ts=float(ts))
+
+    # Link simple concept nodes from cards (no trait/emotion seeding)
+    def _concept_id(k, v): return f"concept::{k}::{v.lower()}"
+    def _add(gs, k, v):
+        cid = _concept_id(k, v)
+        if not gs.has_node(cid): gs.add_node(cid, type="Concept", key=k, value=v)
+        return cid
+    base = float(getattr(config, "EP_CONCEPT_EDGE_BASE", 0.4))
+    added = []
+    for c in (cards or []):
+        k = c.get("key"); v = (c.get("value") or "").strip()
+        if not k or not v: continue
+        cid = _add(gs, k, v)
+        w = max(0.05, min(1.0, base * float(c.get("confidence", 0.9))))
+        gs.add_edge(eid, cid, type="MENTIONS", weight=w)
+        added.append(cid)
+    co_w = float(getattr(config, "CO_OCCUR_EDGE_WEIGHT", 0.18))
+    for i in range(len(added)):
+        for j in range(i+1, len(added)):
+            gs.add_edge(added[i], added[j], type="CO_OCCUR", weight=co_w)
+
+    # Optional: let traits adapt from the windowed summary (not from fixed lists)
+    try:
+        te.discover_new_trait(summary_obj.get("summary",""), qvec)
+        te.save()
+    except Exception:
+        pass
+    return eid
+
 # -------------------- memory gating --------------------
-def memory_relevance_gate(msg: str, final_pairs: List[Tuple[str, float]], db, *,
-                          min_sim=None, min_hits=None, jacc=None, topn=None):
-    """Heuristic: when to include memory gists/facts for this turn."""
+def memory_relevance_gate(
+    msg: str,
+    final_pairs: List[Tuple[str,float]],
+    db,
+    *,
+    user_id: str | None = None,
+    min_sim=None,
+    min_hits=None,
+    jacc=None,
+    topn=None,
+) -> tuple[bool, list[str]]:
+    """
+    Decide whether to include memory and what to include.
+    If recap/previous-session cues are detected, fall back to the most recent episodes
+    instead of relying on vector similarity.
+    """
     min_sim = min_sim if min_sim is not None else getattr(config, "MEMORY_GATE_MIN_SIM", 0.30)
     min_hits = min_hits if min_hits is not None else getattr(config, "MEMORY_GATE_MIN_HITS", 1)
     jacc    = jacc if jacc is not None else getattr(config, "MEMORY_GATE_JACCARD", 0.07)
     topn    = topn if topn is not None else getattr(config, "MEMORY_GATE_GISTS", 8)
 
-    cue_words = getattr(config, "MEMORY_ALWAYS_ON_CUES", ["earlier","before","as we said","again","that thing"])
+    # Broader cue list for recap questions
+    cue_words = set(getattr(config, "MEMORY_ALWAYS_ON_CUES",
+                            ["earlier","before","as we said","again","that thing"]))
+    cue_words |= {
+        "what did we talk", "what did we speak", "recap", "last time",
+        "previous conversation", "previous chat", "resume", "continue from before"
+    }
     mlow = (msg or "").lower()
-    if any(c in mlow for c in cue_words):
-        ids = [eid for eid, _ in (final_pairs or [])[:topn]]
-        gists = []
-        for eid in ids:
-            row = db.con.execute("SELECT gist, summary FROM episodes WHERE id=?", (eid,)).fetchone()
-            if row:
-                g = (row[0] or row[1] or "").strip()
-                if g:
-                    gists.append(g)
-        return True, gists[:3]
 
+    # If recap cues hit, prefer the most recent episodes (not similarity-ranked)
+    if any(c in mlow for c in cue_words):
+        gists = []
+        # try similarity first if available
+        ids = [eid for eid, _ in (final_pairs or [])[:topn]]
+        if ids:
+            for eid in ids:
+                row = db.con.execute("SELECT gist, summary FROM episodes WHERE id=?", (eid,)).fetchone()
+                if row:
+                    g = (row[0] or row[1] or "").strip()
+                    if g: gists.append(" ".join(g.split()[:18]))
+        # if nothing meaningful came back, fallback to most recent episodes
+        if not gists and user_id:
+            gists = recent_memory_hints(db, user_id=user_id, n=topn)
+        return True, gists[:max(1, topn)]
+
+    # Normal similarity-gated path
     smax = max((score for _, score in (final_pairs or [])), default=0.0)
     if smax < float(min_sim):
         return False, []
@@ -111,8 +232,8 @@ def memory_relevance_gate(msg: str, final_pairs: List[Tuple[str, float]], db, *,
             continue
         if _jaccard(msg, g) >= float(jacc):
             hits += 1
-            matched.append(g)
-    return (hits >= int(min_hits)), matched[:3]
+            matched.append(" ".join(g.split()[:18]))
+    return (hits >= int(min_hits)), matched[:topn]
 
 # -------------------- retrieval helpers --------------------
 def assemble_context(user_id: str, msg: str, vs, gs, db, te: TraitEngine):
@@ -299,6 +420,7 @@ def chat(user_id, no_realtime):
 
     dmem = DialogueBuffer(max_turns=30, max_chars=240)
     last_assistant_lines: List[str] = []
+    turn_index = 0  # track first few assistant turns for resume hints
 
     bus = None
     if not no_realtime:
@@ -335,12 +457,15 @@ def chat(user_id, no_realtime):
         # 2.5) memory (topic-gated) + facts
         use_mem, matched_gists = memory_relevance_gate(
             msg, final_pairs, db,
+            user_id=user_id,
             min_sim=getattr(config, "MEMORY_GATE_MIN_SIM", 0.30),
             min_hits=getattr(config, "MEMORY_GATE_MIN_HITS", 1),
             jacc=getattr(config, "MEMORY_GATE_JACCARD", 0.07),
-            topn=getattr(config, "MEMORY_GATE_GISTS", 8),
+            topn=getattr(config, "MEMORY_GATE_GISTS", 30),
         )
+
         if use_mem:
+            # After adding Recent memory hints (inside the turn_index < resume_turns block)
             mem = recall_cards(db, user_id, k=getattr(config, "MEMORY_MAX_CARDS", 12))
             if mem:
                 kv = []
@@ -355,6 +480,30 @@ def chat(user_id, no_realtime):
 
         # 2.6) always include recent dialogue (30 interactions)
         system_text += dmem.render(user_label=name, assistant_label=assistant_label)
+
+        # 2.7) resume hints for first few turns (already present in your file)
+        resume_turns = int(getattr(config, "RESUME_HINT_TURNS", 3))
+        if turn_index < resume_turns:
+            hints = recent_memory_hints(db, user_id=user_id, n=getattr(config, "RESUME_HINT_GISTS", 8))
+            if hints and "Memory focus:" not in system_text:
+                system_text += " Recent memory hints: " + " | ".join(hints[:8]) + "."
+
+        # 2.8) Always surface sticky notes when the user asks about remembering,
+        # or during the initial resume phase
+        needs_notes = (
+            turn_index < resume_turns or
+            any(kw in (msg or "").lower() for kw in [
+                "remember", "remind me", "what did i need to remember",
+                "things i needed to remember", "what did i ask you to remember",
+                "what were the things i asked you to remember"
+            ])
+        )
+        if needs_notes:
+            notes = recall_notes(db, user_id, k=10)
+            if notes:
+                # keep it short; only values
+                note_lines = [n["value"] for n in notes][:8]
+                system_text += " Sticky notes: " + " | ".join(note_lines) + "."
 
         # 3) decoding (wizard controls length; unlimited if set)
         decode_opts = decode_overrides()
@@ -388,7 +537,7 @@ def chat(user_id, no_realtime):
         if cards:
             upsert_cards(db, cards)
 
-        eid = write_episode(db, vs, gs, user_id, msg, qvec, te=te, llm=llm, cards=cards)
+        eid = write_episode_windowed(db, vs, gs, user_id, msg, qvec, te=te, llm=llm, cards=cards, dialogue_lines=list(dmem.lines))
         te.discover_new_trait(msg, qvec)
         te.reinforce(trait_names)
         te.save()
@@ -424,6 +573,9 @@ def chat(user_id, no_realtime):
                 bus.publish("traits", {"traits": te.traits})
         except Exception as e:
             print(f"[warn] realtime publish failed: {e}")
+
+        # advance turn counter for resume hints
+        turn_index += 1
 
 # -------------------- seed persona (optional YAML importer) --------------------
 @cli.command("seed-persona")

@@ -32,13 +32,12 @@ class TabularStore:
                 usage_count INTEGER,
                 last_accessed DOUBLE,
                 gist TEXT DEFAULT '',
-                emotion TEXT DEFAULT ''
-            )
+                emotion TEXT DEFAULT '')
         """)
 
         # Back-compat for older DBs that predate gist/emotion columns or defaults
         self.con.execute("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS gist TEXT")
-        self.con.execute("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS emotion TEXT")
+        self.con.execute("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS emotion TEXT DEFAULT ''")
 
         # Key/Value facts
         self.con.execute("""

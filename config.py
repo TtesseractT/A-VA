@@ -1,6 +1,6 @@
 from pathlib import Path
 
-# Paths
+# ---------- Paths ----------
 DATA_DIR = Path(__file__).parent / "data"
 STORE_DIR = Path(__file__).parent
 DB_PATH = STORE_DIR / "memory.duckdb"
@@ -9,11 +9,19 @@ VECTORS_NPY = STORE_DIR / "vectors.npy"
 GRAPH_PATH = STORE_DIR / "graph.json"
 TRAITS_PATH = DATA_DIR / "traits.json"
 
+# ---------- Emotion / Traits ----------
+EMOTION_REGISTRY_PATH = Path(DATA_DIR) / 'emotions.json'
+EMOTION_LEXICON_PATH  = Path(DATA_DIR) / 'emotion_lexicon.json'
+AUTO_ADD_EMOTION_TRAITS = True  # traits managed by wizard/runtime only
+
 # Embeddings
 # May want to change this to something specific to the language
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"  # 1024-d
 EMBEDDING_DIM = 1024
 EMBEDDING_NORMALIZE = True
+# Resume / recap behaviour
+RESUME_HINT_TURNS = 30     # add hints for first N assistant turns in a new process
+RESUME_HINT_GISTS = 30     # how many recent gists to surface as hints
 
 # Retrieval/scoring
 CANDIDATE_K = 120
@@ -111,4 +119,3 @@ EMOTION_TOPK = 3
 IDENTITY_BLOCKLIST = [
     r"\bassistant\b", r"\blanguage model\b", r"\bas an ai\b", r"\bmy role\b", r"\bi'?m here to help\b",
 ]
-
