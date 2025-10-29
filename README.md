@@ -1,4 +1,4 @@
-# Trait Engine (POC)
+# Adaptive Virtual Agent - AVA Trait Engine
 
 A local-first conversational memory system that lets an AI assistant develop and use long-term memories, traits, and a configurable persona. The system is wizard-driven at startup (you choose the AI's name, your name, role, boundaries, style, and initial traits) and then learns organically from normal use-adding facts and evolving traits at runtime.
 
